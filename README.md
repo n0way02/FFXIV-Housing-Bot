@@ -1,4 +1,4 @@
-# FFXIV Housing Discord Bot
+# **FFXIV Housing Discord Bot**
 
 A Discord bot to monitor and display available housing plots for Final Fantasy XIV (FFXIV) in real time. The bot fetches data from the [PaissaDB API](https://paissadb.zhu.codes) and posts updates to configured Discord channels, with support for filters, lottery phases, and more.
 
