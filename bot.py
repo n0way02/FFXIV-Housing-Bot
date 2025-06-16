@@ -20,6 +20,12 @@ bot = commands.Bot(command_prefix='/', intents=intents)
 # Dicionário para armazenar as configurações dos canais de housing
 housing_channels = {}
 
+# Dicionário para armazenar as notificações dos usuários
+user_notifications = {}
+
+# Dicionário para armazenar o último status conhecido de cada casa
+last_known_status = {}
+
 # Função para salvar as configurações dos canais
 def save_housing_channels():
     with open('housing_channels.json', 'w') as f:
@@ -39,8 +45,52 @@ def load_housing_channels():
             json.dump({}, f, indent=4)
         return {}
 
+# Função para salvar as notificações dos usuários
+def save_user_notifications():
+    with open('user_notifications.json', 'w') as f:
+        json.dump(user_notifications, f, indent=4)
+
+# Função para salvar o último status conhecido
+def save_last_known_status():
+    with open('last_known_status.json', 'w') as f:
+        json.dump(last_known_status, f, indent=4)
+
+# Função para carregar as notificações dos usuários
+def load_user_notifications():
+    try:
+        with open('user_notifications.json', 'r') as f:
+            content = f.read()
+            if not content:  # Se o arquivo estiver vazio
+                return {}
+            return json.loads(content)
+    except (FileNotFoundError, json.JSONDecodeError):
+        # Se o arquivo não existir ou estiver mal formatado, cria um novo
+        with open('user_notifications.json', 'w') as f:
+            json.dump({}, f, indent=4)
+        return {}
+
+# Função para carregar o último status conhecido
+def load_last_known_status():
+    try:
+        with open('last_known_status.json', 'r') as f:
+            content = f.read()
+            if not content:  # Se o arquivo estiver vazio
+                return {}
+            return json.loads(content)
+    except (FileNotFoundError, json.JSONDecodeError):
+        # Se o arquivo não existir ou estiver mal formatado, cria um novo
+        with open('last_known_status.json', 'w') as f:
+            json.dump({}, f, indent=4)
+        return {}
+
 # Carrega as configurações salvas
 housing_channels = load_housing_channels()
+
+# Carrega as notificações salvas
+user_notifications = load_user_notifications()
+
+# Carrega o último status conhecido
+last_known_status = load_last_known_status()
 
 # Dicionário de data centers e mundos
 DATA_CENTERS = {
@@ -166,7 +216,7 @@ WORLD_IDS = {
 }
 
 # Tamanhos de casa disponíveis
-HOUSE_SIZES = ['pequena', 'média', 'grande']
+HOUSE_SIZES = ['small', 'medium', 'large']
 
 # Distritos disponíveis
 DISTRICTS = ['shirogane', 'lavender beds', 'mist', 'goblet', 'empyreum']
@@ -272,7 +322,7 @@ def get_house_data(data_center, world, size=None, district=None):
                 
                 # Aplica os filtros opcionais
                 if size:
-                    size_map = {"pequena": "Small", "média": "Medium", "grande": "Large"}
+                    size_map = {"small": "Small", "medium": "Medium", "large": "Large"}
                     if house_data['size'] != size_map.get(size.lower()):
                         continue
                 
@@ -307,18 +357,26 @@ async def casas_para_comprar(
     
     if data_center not in DATA_CENTERS:
         await interaction.followup.send(f"Data center inválido. Data centers disponíveis: {', '.join(DATA_CENTERS.keys())}")
+        asyncio.sleep(15)
+        await interaction.delete_original_response()
         return
     
     if world not in DATA_CENTERS[data_center]:
         await interaction.followup.send(f"Mundo inválido para o data center {data_center}. Mundos disponíveis: {', '.join(DATA_CENTERS[data_center])}")
+        asyncio.sleep(15)
+        await interaction.delete_original_response()    
         return
     
     if tamanho and tamanho.lower() not in HOUSE_SIZES:
         await interaction.followup.send(f"Tamanho inválido. Tamanhos disponíveis: {', '.join(HOUSE_SIZES)}")
+        asyncio.sleep(15)  # Espera 5 segundos antes de apagar a mensagem
+        await interaction.delete_original_response()
         return
     
     if distrito and distrito.lower() not in DISTRICTS:
         await interaction.followup.send(f"Distrito inválido. Distritos disponíveis: {', '.join(DISTRICTS)}")
+        asyncio.sleep(15)
+        await interaction.delete_original_response()
         return
     
     # Busca os dados das casas
@@ -511,6 +569,146 @@ async def set_housing_channel(
     await interaction.response.send_message(f"Canal {channel.mention} configurado para monitorar casas em {world.capitalize()}" + 
                                           (f" no distrito {district.capitalize()}" if district else ""), ephemeral=True)
 
+class NotificationButton(discord.ui.View):
+    def __init__(self, house_data, world, timeout=1800):  # 30 minutos de timeout
+        super().__init__(timeout=timeout)
+        self.house_data = house_data
+        self.world = world
+
+    @discord.ui.button(label="🔔 Ativar Notificações", style=discord.ButtonStyle.primary)
+    async def notify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user_id = str(interaction.user.id)
+        
+        # Cria uma chave única para a casa
+        house_key = f"{self.world}_{self.house_data['district']}_{self.house_data['ward']}_{self.house_data['plot']}"
+        
+        # Inicializa o dicionário do usuário se não existir
+        if user_id not in user_notifications:
+            user_notifications[user_id] = {
+                "notifications": [],
+                "username": str(interaction.user)
+            }
+        
+        # Verifica se o usuário já está notificando esta casa
+        if house_key in user_notifications[user_id]["notifications"]:
+            try:
+                embed = discord.Embed(
+                    title="⚠️ Notificação Já Ativa",
+                    description="Você já está recebendo notificações para esta casa!",
+                    color=discord.Color.yellow()
+                )
+                await interaction.user.send(embed=embed)
+            except discord.Forbidden:
+                await interaction.response.send_message("Não foi possível enviar a mensagem de confirmação. Verifique se você tem DMs abertas!", ephemeral=True)
+            return
+        
+        # Adiciona a notificação
+        user_notifications[user_id]["notifications"].append(house_key)
+        save_user_notifications()
+        
+        # Salva o status atual como último status conhecido
+        last_known_status[house_key] = {
+            "lotto_phase": self.house_data['lotto_phase'],
+            "lotto_entries": self.house_data['lotto_entries'],
+            "lotto_phase_until": self.house_data.get('lotto_phase_until')
+        }
+        save_last_known_status()
+        
+        # Envia confirmação via DM
+        try:
+            embed = discord.Embed(
+                title="🔔 Notificação Ativada",
+                description="Você receberá notificações sobre mudanças no status desta casa.",
+                color=discord.Color.green(),
+                timestamp=discord.utils.utcnow()
+            )
+            
+            # Adiciona informações da casa
+            embed.add_field(
+                name="🏰 Localização",
+                value=f"{self.house_data['district']} - Ward {self.house_data['ward']} Plot {self.house_data['plot']}",
+                inline=False
+            )
+            
+            embed.add_field(
+                name="🌍 Mundo",
+                value=self.world.capitalize(),
+                inline=False
+            )
+            
+            # Adiciona informações do status atual
+            lotto_phase = LOTTO_PHASES.get(self.house_data['lotto_phase'], "❓ Unknown")
+            entries = self.house_data['lotto_entries'] if self.house_data['lotto_entries'] is not None else "?"
+            
+            embed.add_field(
+                name="📊 Status Atual",
+                value=f"Status: {lotto_phase}\nInscrições: {entries}",
+                inline=False
+            )
+            
+            # Adiciona dica sobre gerenciamento
+            embed.add_field(
+                name="💡 Dica",
+                value="Use o comando `/my_notifications` para gerenciar suas notificações.",
+                inline=False
+            )
+            
+            await interaction.user.send(embed=embed)
+            await interaction.response.send_message("✅ Notificação ativada! Verifique suas mensagens diretas.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message("Não foi possível enviar a mensagem de confirmação. Verifique se você tem DMs abertas!", ephemeral=True)
+
+# Modifique a função que cria os embeds para incluir os botões
+def create_house_embed(house, world):
+    embed = discord.Embed(
+        title=f"{DISTRICT_EMOJIS.get(house['district'], '🏘️')} {house['district']}",
+        description=f"Mundo: **{world.capitalize()}**",
+        color=DISTRICT_COLORS.get(house['district'], discord.Color.blue()),
+        timestamp=discord.utils.utcnow()
+    )
+
+    # Formata o sistema de compra (sempre será loteria)
+    entries = house['lotto_entries'] if house['lotto_entries'] is not None else "?"
+    purchase_info = f"🎫 Loteria (Inscrições: {entries})"
+    
+    # Adiciona a fase da loteria
+    lotto_phase = LOTTO_PHASES.get(house['lotto_phase'], "❓ Unknown")
+    purchase_info = f"🎫 Loteria (Inscrições: {entries})\n📌 Status: {lotto_phase}"
+
+    # Adiciona até quando vai a fase da loteria, se disponível
+    if house.get('lotto_phase_until'):
+        try:
+            from datetime import timezone, timedelta
+            until_dt = datetime.utcfromtimestamp(house['lotto_phase_until']) - timedelta(hours=3)
+            until_str = until_dt.strftime('%d/%m/%Y %H:%M')
+            purchase_info += f"\n⏰ Até: {until_str} (Brasília)"
+        except Exception:
+            pass
+
+    # Formata o preço em milhões se for maior que 1M
+    price = house['price']
+    if price >= 1000000:
+        price_text = f"{price/1000000:.1f}M gil"
+    else:
+        price_text = f"{price:,} gil"
+
+    size_emoji = SIZE_EMOJIS.get(house['size'], "🏠")
+
+    value_text = (
+        f"{size_emoji} **{house['size']}**\n"
+        f"💰 {price_text}\n"
+        f"📍 {purchase_info}"
+    )
+
+    embed.add_field(
+        name=f"Ward {house['ward']} • Plot {house['plot']}",
+        value=value_text,
+        inline=False
+    )
+
+    return embed
+
+# Modifique a função update_housing_channels para usar o novo sistema de embeds e botões
 @tasks.loop(minutes=30)
 async def update_housing_channels():
     # Proteção para evitar execução duplicada
@@ -577,79 +775,117 @@ async def update_housing_channels():
 
                     # Cria embeds por distrito
                     for district, district_houses in houses_by_district.items():
-                        embed = discord.Embed(
+                        # Ordena as casas por tamanho e depois por preço
+                        district_houses.sort(key=lambda x: (["Small", "Medium", "Large"].index(x['size']), x['price']))
+                        
+                        # Cria o embed do distrito
+                        district_embed = discord.Embed(
                             title=f"{DISTRICT_EMOJIS.get(district, '🏘️')} {district}",
                             description=f"Mundo: **{channel_config['world'].capitalize()}**",
                             color=DISTRICT_COLORS.get(district, discord.Color.blue()),
                             timestamp=discord.utils.utcnow()
                         )
-
-                        # Ordena as casas por tamanho e depois por preço
-                        district_houses.sort(key=lambda x: (["Small", "Medium", "Large"].index(x['size']), x['price']))
-
+                        
+                        # Adiciona estatísticas do distrito
+                        stats = {
+                            "Small": len([h for h in district_houses if h['size'] == "Small"]),
+                            "Medium": len([h for h in district_houses if h['size'] == "Medium"]),
+                            "Large": len([h for h in district_houses if h['size'] == "Large"])
+                        }
+                        
+                        stats_text = " • ".join([
+                            f"{SIZE_EMOJIS[size]} {count}" for size, count in stats.items() if count > 0
+                        ])
+                        
+                        district_embed.add_field(
+                            name="📊 Distribuição",
+                            value=stats_text,
+                            inline=False
+                        )
+                        
+                        # Envia o embed do distrito
+                        district_message = await channel.send(embed=district_embed)
+                        channel_config['messages'].append(district_message.id)
+                        
+                        # Cria um embed para cada casa no distrito
                         for house in district_houses:
-                            # Formata o sistema de compra (sempre será loteria)
-                            entries = house['lotto_entries'] if house['lotto_entries'] is not None else "?"
-                            purchase_info = f"🎫 Loteria (Inscrições: {entries})"
+                            embed = create_house_embed(house, channel_config['world'])
+                            view = NotificationButton(house, channel_config['world'])
+                            message = await channel.send(embed=embed, view=view)
+                            channel_config['messages'].append(message.id)
                             
-                            # Adiciona a fase da loteria
-                            lotto_phase = LOTTO_PHASES.get(house['lotto_phase'], "❓ Unknown")
-                            purchase_info = f"🎫 Loteria (Inscrições: {entries})\n📌 Status: {lotto_phase}"
-
-                            # Adiciona até quando vai a fase da loteria, se disponível
-                            if house.get('lotto_phase_until'):
-                                try:
-                                    from datetime import timezone, timedelta
-                                    until_dt = datetime.utcfromtimestamp(house['lotto_phase_until']) - timedelta(hours=3)
-                                    until_str = until_dt.strftime('%d/%m/%Y %H:%M')
-                                    purchase_info += f"\n⏰ Até: {until_str} (Brasília)"
-                                except Exception:
-                                    pass
-
-                            # Formata o preço em milhões se for maior que 1M
-                            price = house['price']
-                            if price >= 1000000:
-                                price_text = f"{price/1000000:.1f}M gil"
-                            else:
-                                price_text = f"{price:,} gil"
-
-                            size_emoji = SIZE_EMOJIS.get(house['size'], "🏠")
-
-                            value_text = (
-                                f"{size_emoji} **{house['size']}**\n"
-                                f"💰 {price_text}\n"
-                                f"📍 {purchase_info}"
-                            )
-
-                            embed.add_field(
-                                name=f"Ward {house['ward']} • Plot {house['plot']}",
-                                value=value_text,
-                                inline=False
-                            )
-
-                        total_houses = len(district_houses)
-                        embed.set_footer(text=f"Total de casas disponíveis: {total_houses}")
-
-                        if total_houses > 0:
-                            # Adiciona um campo com estatísticas
-                            stats = {
-                                "Small": len([h for h in district_houses if h['size'] == "Small"]),
-                                "Medium": len([h for h in district_houses if h['size'] == "Medium"]),
-                                "Large": len([h for h in district_houses if h['size'] == "Large"])
-                            }
-
-                            stats_text = " • ".join([
-                                f"{SIZE_EMOJIS[size]} {count}" for size, count in stats.items() if count > 0
-                            ])
-
-                            embed.add_field(
-                                name="📊 Distribuição",
-                                value=stats_text,
-                                inline=False
-                            )
-
-                        message = await channel.send(embed=embed)
-                        channel_config['messages'].append(message.id)
+                            # Verifica se há usuários para notificar sobre mudanças
+                            for user_id, user_data in user_notifications.items():
+                                house_key = f"{channel_config['world']}_{district}_{house['ward']}_{house['plot']}"
+                                if house_key in user_data["notifications"]:
+                                    # Verifica se houve mudança no status
+                                    current_status = {
+                                        "lotto_phase": house['lotto_phase'],
+                                        "lotto_entries": house['lotto_entries'],
+                                        "lotto_phase_until": house.get('lotto_phase_until')
+                                    }
+                                    
+                                    last_status = last_known_status.get(house_key, {})
+                                    
+                                    # Só envia notificação se houver mudança real
+                                    if (current_status["lotto_phase"] != last_status.get("lotto_phase") or
+                                        current_status["lotto_entries"] != last_status.get("lotto_entries") or
+                                        current_status["lotto_phase_until"] != last_status.get("lotto_phase_until")):
+                                        
+                                        # Atualiza o último status conhecido
+                                        last_known_status[house_key] = current_status
+                                        save_last_known_status()
+                                        
+                                        user = await bot.fetch_user(int(user_id))
+                                        if user:
+                                            try:
+                                                embed = discord.Embed(
+                                                    title="🔔 Atualização de Status",
+                                                    description="O status de uma casa que você está monitorando mudou!",
+                                                    color=discord.Color.blue(),
+                                                    timestamp=discord.utils.utcnow()
+                                                )
+                                                
+                                                # Adiciona informações da casa
+                                                embed.add_field(
+                                                    name="🏰 Localização",
+                                                    value=f"{district} - Ward {house['ward']} Plot {house['plot']}",
+                                                    inline=False
+                                                )
+                                                
+                                                embed.add_field(
+                                                    name="🌍 Mundo",
+                                                    value=channel_config['world'].capitalize(),
+                                                    inline=False
+                                                )
+                                                
+                                                # Adiciona informações do novo status
+                                                lotto_phase = LOTTO_PHASES.get(house['lotto_phase'], "❓ Unknown")
+                                                entries = house['lotto_entries'] if house['lotto_entries'] is not None else "?"
+                                                
+                                                embed.add_field(
+                                                    name="📊 Novo Status",
+                                                    value=f"Status: {lotto_phase}\nInscrições: {entries}",
+                                                    inline=False
+                                                )
+                                                
+                                                # Adiciona até quando vai a fase da loteria, se disponível
+                                                if house.get('lotto_phase_until'):
+                                                    try:
+                                                        from datetime import timezone, timedelta
+                                                        until_dt = datetime.utcfromtimestamp(house['lotto_phase_until']) - timedelta(hours=3)
+                                                        until_str = until_dt.strftime('%d/%m/%Y %H:%M')
+                                                        embed.add_field(
+                                                            name="⏰ Próxima Mudança",
+                                                            value=f"{until_str} (Brasília)",
+                                                            inline=False
+                                                        )
+                                                    except Exception:
+                                                        pass
+                                                
+                                                await user.send(embed=embed)
+                                            except Exception as e:
+                                                print(f"Erro ao enviar notificação para {user_id}: {e}")
 
                     # Atualiza o dicionário original com as novas mensagens
                     housing_channels[guild_id]["channels"][channel_id] = channel_config
@@ -698,7 +934,7 @@ async def housing_help(interaction: discord.Interaction):
     embed.add_field(
         name="🔧 Parâmetros Opcionais",
         value=(
-            "• `tamanho`: Filtra por tamanho da casa (pequena, média, grande)\n"
+            "• `tamanho`: Filtra por tamanho da casa (small, medium, large)\n"
             "• `distrito`: Filtra por distrito específico (shirogane, lavender beds, mist, goblet, empyreum)"
         ),
         inline=False
@@ -727,7 +963,7 @@ async def housing_help(interaction: discord.Interaction):
 
     embed.add_field(
         name="📝 Exemplo",
-        value="`/housing_check data_center:primal world:behemoth tamanho:pequena distrito:shirogane`",
+        value="`/housing_check data_center:primal world:behemoth tamanho:small distrito:shirogane`",
         inline=False
     )
 
@@ -813,6 +1049,45 @@ async def clear_houses(interaction: discord.Interaction, channel: discord.TextCh
         return
 
     await interaction.followup.send(f"Foram deletadas {deleted} mensagens do canal {channel.mention}.", ephemeral=True)
+
+@bot.tree.command(name="my_notifications", description="Gerencia suas notificações de casas")
+async def my_notifications(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)
+    
+    if user_id not in user_notifications or not user_notifications[user_id]["notifications"]:
+        await interaction.response.send_message("Você não tem nenhuma notificação ativa.", ephemeral=True)
+        return
+    
+    embed = discord.Embed(
+        title="🔔 Suas Notificações",
+        description="Lista de casas que você está monitorando:",
+        color=discord.Color.blue()
+    )
+    
+    for house_key in user_notifications[user_id]["notifications"]:
+        world, district, ward, plot = house_key.split('_')
+        embed.add_field(
+            name=f"🏰 {district} - Ward {ward} Plot {plot}",
+            value=f"🌍 {world.capitalize()}",
+            inline=False
+        )
+    
+    class NotificationManager(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=300)  # 5 minutos de timeout
+        
+        @discord.ui.button(label="Remover Todas", style=discord.ButtonStyle.danger)
+        async def remove_all(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if str(interaction.user.id) != user_id:
+                await interaction.response.send_message("Este botão não é para você!", ephemeral=True)
+                return
+            
+            user_notifications[user_id]["notifications"] = []
+            save_user_notifications()
+            await interaction.response.send_message("Todas as suas notificações foram removidas.", ephemeral=True)
+            await interaction.message.delete()
+    
+    await interaction.response.send_message(embed=embed, view=NotificationManager(), ephemeral=True)
 
 # Inicia o bot
 bot.run(os.getenv('DISCORD_TOKEN')) 
